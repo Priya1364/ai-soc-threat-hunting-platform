@@ -2,21 +2,21 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import hashlib
-import time
-import re
 import joblib
 import os
+import requests
 import plotly.express as px
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.naive_bayes import MultinomialNB
 
 # ---------------- CONFIG ----------------
-st.set_page_config(page_title="AI SOC Threat Hunting", layout="wide")
+st.set_page_config(page_title="AI SOC Platform", layout="wide")
 
 # ---------------- DATABASE ----------------
 conn = sqlite3.connect("soc.db", check_same_thread=False)
 c = conn.cursor()
 
+# Fresh tables (safe)
 c.execute("""
 CREATE TABLE IF NOT EXISTS users(
 username TEXT PRIMARY KEY,
@@ -40,11 +40,11 @@ conn.commit()
 def hash_password(p):
     return hashlib.sha256(p.encode()).hexdigest()
 
-# ---------------- ADMIN CREATE ----------------
+# ---------------- CREATE ADMIN ----------------
 def create_admin():
     c.execute("SELECT * FROM users WHERE username=?", ("admin",))
     if not c.fetchone():
-        c.execute("INSERT INTO users VALUES (?,?,?)",
+        c.execute("INSERT INTO users(username,password,role) VALUES (?,?,?)",
                   ("admin", hash_password("admin@123"), "admin"))
         conn.commit()
 
@@ -62,24 +62,46 @@ def load_model():
     if os.path.exists("model.pkl"):
         return joblib.load("model.pkl"), joblib.load("vectorizer.pkl")
 
-    data = pd.read_csv("https://raw.githubusercontent.com/justmarkham/pycon-2016-tutorial/master/data/sms.tsv",
-                       sep="\t", names=["label","message"])
+    data = pd.read_csv(
+        "https://raw.githubusercontent.com/justmarkham/pycon-2016-tutorial/master/data/sms.tsv",
+        sep="\t",
+        names=["label", "message"]
+    )
 
-    data["label"] = data["label"].map({"ham":0,"spam":1})
+    data["label"] = data["label"].map({"ham": 0, "spam": 1})
 
-    vectorizer = TfidfVectorizer(stop_words="english")
-    X = vectorizer.fit_transform(data["message"])
+    vec = TfidfVectorizer(stop_words="english")
+    X = vec.fit_transform(data["message"])
     y = data["label"]
 
     model = MultinomialNB()
     model.fit(X, y)
 
     joblib.dump(model, "model.pkl")
-    joblib.dump(vectorizer, "vectorizer.pkl")
+    joblib.dump(vec, "vectorizer.pkl")
 
-    return model, vectorizer
+    return model, vec
 
 model, vectorizer = load_model()
+
+# ---------------- URL SCAN (API) ----------------
+def scan_url(url):
+    try:
+        api_key = st.secrets.get("VIRUSTOTAL_API_KEY", None)
+
+        if not api_key:
+            return "API Not Configured"
+
+        headers = {"x-apikey": api_key}
+        response = requests.get("https://www.virustotal.com/api/v3/urls", headers=headers)
+
+        if response.status_code == 200:
+            return "Checked"
+        else:
+            return "Error"
+
+    except Exception as e:
+        return "Scan Failed"
 
 # ---------------- AUTH ----------------
 def auth():
@@ -97,7 +119,7 @@ def auth():
             if c.fetchone():
                 st.warning("User already exists")
             else:
-                c.execute("INSERT INTO users VALUES (?,?,?)",
+                c.execute("INSERT INTO users(username,password,role) VALUES (?,?,?)",
                           (username, hash_password(password), "user"))
                 conn.commit()
                 st.success("Account created")
@@ -128,12 +150,12 @@ def dashboard():
 
     if menu == "Home":
         st.title("🛡 AI SOC Dashboard")
-        st.success("System Active")
+        st.success("System Running")
 
     elif menu == "Analyze":
         st.title("📧 Phishing Detection")
 
-        msg = st.text_area("Enter Email / Message")
+        msg = st.text_area("Enter Message")
 
         if st.button("Analyze"):
             if not msg:
@@ -154,6 +176,11 @@ def dashboard():
                 st.success("✅ Safe")
 
             st.write(f"Risk Score: {prob:.2f}%")
+
+            # URL scan
+            urls = [u for u in msg.split() if "http" in u]
+            for u in urls:
+                st.write(f"{u} → {scan_url(u)}")
 
             c.execute("INSERT INTO alerts VALUES (?,?,?,?)",
                       (st.session_state["user"], msg, prob, status))
