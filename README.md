@@ -57,6 +57,10 @@ pip install -r requirements.txt streamlit run app.py
 
 ## 🌐 Deployment
 Deploy using Streamlit Cloud.
+----
+
+## 🌐 Deployment link 
+https://ai-soc-threat-hunting-platform-9tkdozxvmezxla8ehufygx.streamlit.app/
 
 ---
 
