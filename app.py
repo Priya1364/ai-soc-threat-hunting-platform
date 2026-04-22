@@ -1,14 +1,10 @@
 import streamlit as st
 import sqlite3
 import hashlib
-import time
-import requests
 import pandas as pd
 import re
 import joblib
 import os
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.naive_bayes import MultinomialNB
 import plotly.express as px
 
 # ---------------- CONFIG ----------------
@@ -18,23 +14,43 @@ st.set_page_config(page_title="SOC Platform", layout="wide")
 conn = sqlite3.connect("soc.db", check_same_thread=False)
 c = conn.cursor()
 
-c.execute("CREATE TABLE IF NOT EXISTS users(username TEXT, password TEXT, role TEXT)")
-c.execute("CREATE TABLE IF NOT EXISTS alerts(username TEXT, message TEXT, risk REAL, status TEXT)")
+c.execute("""
+CREATE TABLE IF NOT EXISTS users(
+username TEXT PRIMARY KEY,
+password TEXT,
+role TEXT
+)
+""")
+
+c.execute("""
+CREATE TABLE IF NOT EXISTS alerts(
+username TEXT,
+message TEXT,
+risk REAL,
+status TEXT
+)
+""")
 conn.commit()
+
+# ---------------- DEFAULT ADMIN ----------------
+def create_admin():
+    admin_user = "admin"
+    admin_pass = hashlib.sha256("admin@123".encode()).hexdigest()
+
+    c.execute("SELECT * FROM users WHERE username=?", (admin_user,))
+    if not c.fetchone():
+        c.execute("INSERT INTO users VALUES (?, ?, ?)", (admin_user, admin_pass, "admin"))
+        conn.commit()
+
+create_admin()
 
 # ---------------- HASH ----------------
 def hash_password(p):
     return hashlib.sha256(p.encode()).hexdigest()
 
-# ---------------- SESSION TIMEOUT ----------------
-if "last_active" not in st.session_state:
-    st.session_state.last_active = time.time()
-
-if time.time() - st.session_state.last_active > 600:
+# ---------------- SESSION ----------------
+if "user" not in st.session_state:
     st.session_state.user = None
-    st.warning("Session expired")
-
-st.session_state.last_active = time.time()
 
 # ---------------- MODEL ----------------
 @st.cache_resource
@@ -45,7 +61,10 @@ def load_model():
     data = pd.read_csv("sms.tsv", sep="\t", names=["label", "message"])
     data["label"] = data["label"].map({"ham":0,"spam":1})
 
-    vec = TfidfVectorizer(stop_words="english")
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.naive_bayes import MultinomialNB
+
+    vec = TfidfVectorizer()
     X = vec.fit_transform(data["message"])
     y = data["label"]
 
@@ -59,99 +78,94 @@ def load_model():
 
 model, vectorizer = load_model()
 
-# ---------------- URL SCAN ----------------
-def scan_url(url):
-    api_key = st.secrets["VIRUSTOTAL_API_KEY"]
-    headers = {"x-apikey": api_key}
-    response = requests.get(f"https://www.virustotal.com/api/v3/urls/{url}", headers=headers)
-
-    if response.status_code == 200:
-        return "Checked"
-    return "Error"
-
 # ---------------- AUTH ----------------
-if "user" not in st.session_state:
-    st.session_state.user = None
+def auth():
+    st.title("🔐 Secure Login System")
 
-def login():
-    st.title("🔐 SOC Login")
+    choice = st.radio("Select", ["Login", "Signup"])
 
-    choice = st.selectbox("Select",["Login","Signup"])
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
 
-    user = st.text_input("Username")
-    pwd = st.text_input("Password",type="password")
+    if choice == "Signup":
+        if st.button("Create Account"):
+            if len(password) < 6:
+                st.error("Weak password ❌")
+                return
 
-    if choice=="Signup":
-        if st.button("Create"):
-            c.execute("INSERT INTO users VALUES(?,?,?)",(user,hash_password(pwd),"user"))
-            conn.commit()
-            st.success("Account created")
-
-    if choice=="Login":
-        if st.button("Login"):
-            c.execute("SELECT * FROM users WHERE username=? AND password=?",(user,hash_password(pwd)))
-            res=c.fetchone()
-            if res:
-                st.session_state.user=res[0]
-                st.session_state.role=res[2]
+            c.execute("SELECT * FROM users WHERE username=?", (username,))
+            if c.fetchone():
+                st.error("User exists ❌")
             else:
-                st.error("Invalid login")
+                c.execute("INSERT INTO users VALUES (?, ?, ?)",
+                          (username, hash_password(password), "user"))
+                conn.commit()
+                st.success("Account created ✅")
+
+    if choice == "Login":
+        if st.button("Login"):
+            c.execute("SELECT * FROM users WHERE username=? AND password=?",
+                      (username, hash_password(password)))
+            user = c.fetchone()
+
+            if user:
+                st.session_state.user = username
+                st.success("Login success ✅")
+                st.rerun()
+            else:
+                st.error("Invalid credentials ❌")
 
 # ---------------- DASHBOARD ----------------
 def dashboard():
-    st.sidebar.title("SOC MENU")
+    st.sidebar.title(f"👤 {st.session_state.user}")
 
-    menu = st.sidebar.radio("Navigate",["Home","Analyze","Trends","Admin","Logout"])
+    menu = st.sidebar.radio("Menu", ["Home","Analyze","History","Trends","Logout"])
 
-    if menu=="Home":
+    if menu == "Home":
         st.title("🛡 SOC Dashboard")
         st.success("System Active")
 
-    if menu=="Analyze":
-        msg = st.text_area("Enter message")
+    elif menu == "Analyze":
+        msg = st.text_area("Enter Message")
 
         if st.button("Analyze"):
             vec = vectorizer.transform([msg])
             prob = model.predict_proba(vec)[0][1]*100
 
-            if prob>70:
-                status="PHISHING"
-                st.error("High Risk")
-            elif prob>40:
-                status="SUSPICIOUS"
-                st.warning("Medium Risk")
+            if prob > 70:
+                status = "PHISHING"
+                st.error("🔴 High Risk")
+            elif prob > 40:
+                status = "SUSPICIOUS"
+                st.warning("🟠 Medium Risk")
             else:
-                status="SAFE"
-                st.success("Safe")
+                status = "SAFE"
+                st.success("🟢 Safe")
 
-            urls = re.findall(r'(https?://\S+)', msg)
-            for u in urls:
-                st.write("URL Scan:", scan_url(u))
+            st.metric("Risk Score", f"{prob:.2f}%")
 
-            c.execute("INSERT INTO alerts VALUES(?,?,?,?)",(st.session_state.user,msg,prob,status))
+            c.execute("INSERT INTO alerts VALUES(?,?,?,?)",
+                      (st.session_state.user,msg,prob,status))
             conn.commit()
 
-    if menu=="Trends":
-        df = pd.read_sql_query("SELECT status FROM alerts",conn)
-        fig = px.bar(df["status"].value_counts(),title="Threat Distribution")
-        st.plotly_chart(fig)
+    elif menu == "History":
+        df = pd.read_sql_query(
+            f"SELECT * FROM alerts WHERE username='{st.session_state.user}'", conn)
+        st.dataframe(df)
 
-    if menu=="Admin":
-        if st.session_state.role=="admin":
-            df = pd.read_sql_query("SELECT * FROM users",conn)
-            st.dataframe(df)
-        else:
-            st.error("Access denied")
+    elif menu == "Trends":
+        df = pd.read_sql_query("SELECT status FROM alerts", conn)
+        st.plotly_chart(px.bar(df["status"].value_counts()))
 
-    if menu=="Logout":
-        st.session_state.user=None
+    elif menu == "Logout":
+        st.session_state.user = None
         st.rerun()
 
 # ---------------- MAIN ----------------
 if st.session_state.user:
     dashboard()
 else:
-    login()
+    auth()
 
 # ---------------- FOOTER ----------------
 st.markdown("---")
